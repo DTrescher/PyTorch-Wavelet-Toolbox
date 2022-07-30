@@ -1,5 +1,11 @@
 """Utility methods to compute wavelet decompositions from a dataset."""
-from typing import Protocol, Sequence, Tuple, Union
+import sys
+from typing import Sequence, Tuple, Union
+
+if sys.version_info < (3,8):
+    from typing_extensions import Protocol
+else:
+    from typing import Protocol
 
 import pywt
 import torch
