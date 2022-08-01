@@ -5,14 +5,15 @@ from typing import List, Optional, Sequence, Tuple, Union
 import pywt
 import torch
 
-from ._util import Wavelet, _as_wavelet
+from ._util import Wavelet, _as_wavelet, _wavelet_as_tensor, _circular_convolve_d, _circular_convolve_s, _up_arrow_op, \
+    _period_list, _circular_convolve_mra
 
 
 def get_filter_tensors(
-    wavelet: Union[Wavelet, str],
-    flip: bool,
-    device: Union[torch.device, str],
-    dtype: torch.dtype = torch.float32,
+        wavelet: Union[Wavelet, str],
+        flip: bool,
+        device: Union[torch.device, str],
+        dtype: torch.dtype = torch.float32,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Convert input wavelet to filter tensors.
 
@@ -36,9 +37,7 @@ def get_filter_tensors(
             if isinstance(filter, torch.Tensor):
                 return filter.flip(-1).unsqueeze(0).to(device)
             else:
-                return torch.tensor(filter[::-1], device=device, dtype=dtype).unsqueeze(
-                    0
-                )
+                return torch.tensor(filter[::-1], device=device, dtype=dtype).unsqueeze(0)
         else:
             if isinstance(filter, torch.Tensor):
                 return filter.unsqueeze(0).to(device)
@@ -112,7 +111,7 @@ def _translate_boundary_strings(pywt_mode: str) -> str:
 
 
 def fwt_pad(
-    data: torch.Tensor, wavelet: Union[Wavelet, str], mode: str = "reflect"
+        data: torch.Tensor, wavelet: Union[Wavelet, str], mode: str = "reflect"
 ) -> torch.Tensor:
     """Pad the input signal to make the fwt matrix work.
 
@@ -142,10 +141,10 @@ def fwt_pad(
 
 
 def _flatten_2d_coeff_lst(
-    coeff_lst_2d: List[
-        Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
-    ],
-    flatten_tensors: bool = True,
+        coeff_lst_2d: List[
+            Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+        ],
+        flatten_tensors: bool = True,
 ) -> List[torch.Tensor]:
     """Flattens a list of tensor tuples into a single list.
 
@@ -173,10 +172,10 @@ def _flatten_2d_coeff_lst(
 
 
 def wavedec(
-    data: torch.Tensor,
-    wavelet: Union[Wavelet, str],
-    level: Optional[int] = None,
-    mode: str = "reflect",
+        data: torch.Tensor,
+        wavelet: Union[Wavelet, str],
+        level: Optional[int] = None,
+        mode: str = "reflect",
 ) -> List[torch.Tensor]:
     """Compute the analysis (forward) 1d fast wavelet transform.
 
@@ -281,10 +280,132 @@ def waverec(coeffs: List[torch.Tensor], wavelet: Union[Wavelet, str]) -> torch.T
                 padr += 1
                 pred_len = res_lo.shape[-1] - (padl + padr)
                 assert (
-                    next_len == pred_len
+                        next_len == pred_len
                 ), "padding error, please open an issue on github "
         if padl > 0:
             res_lo = res_lo[..., padl:]
         if padr > 0:
             res_lo = res_lo[..., :-padr]
     return res_lo
+
+
+def modwt(data: torch.Tensor,
+          wavelet: Union[Wavelet, str],
+          level: Optional[int] = None
+          ) -> torch.Tensor:
+    """
+    Args:
+        data (torch.Tensor): Input time series.
+            Shapes:
+                [window]
+                [batch, window]
+                [batch, features, window]
+        wavelet (Wavelet or str): A pywt wavelet compatible object or the name of a pywt wavelet.
+        level (int): The scale level to be computed. Defaults to None.
+    Example:
+        >>> import torch
+        >>> import ptwt, pywt
+        >>> import numpy as np
+        >>> # generate an input of even length.
+        >>> d = torch.tensor([0., 1, 2, 3, 4, 5, 5, 4, 3, 2, 1, 0])
+        >>> # compute the forward fwt coefficients
+        >>> ptwt.modwt(d, pywt.Wavelet('haar'), level=2)
+    """
+    if data.dim() == 1:
+        # assume time series
+        data = data.view(1, 1, -1)
+    elif data.dim() == 2:
+        # assume batched time series
+        data = data.unsqueeze(1)
+
+    dec_lo, dec_hi, _, _ = _wavelet_as_tensor(wavelet, data.device, data.dtype)
+
+    dec_lo = dec_lo / torch.sqrt(torch.tensor(2.))
+    dec_hi = dec_hi / torch.sqrt(torch.tensor(2.))
+
+    if level is None:
+        level = pywt.dwt_max_level(data.shape[-1], dec_lo.shape[-1])
+
+    wavecoeff = []
+    v_j_1 = data
+    for j in range(level):
+        w = _circular_convolve_d(dec_hi, v_j_1, j + 1)
+        v_j_1 = _circular_convolve_d(dec_lo, v_j_1, j + 1)
+        wavecoeff.append(w)
+    wavecoeff.append(v_j_1)
+    return torch.stack(wavecoeff)
+
+
+def imodwt(coeffs: torch.Tensor, wavelet: Union[Wavelet, str]) -> torch.Tensor:
+    """
+    Args:
+        coeffs (torch.Tensor): The wavelet coefficients produced by modwt.
+        wavelet (Wavelet or str): A pywt wavelet compatible object or the name of a pywt wavelet.
+
+    Example:
+        >>> import torch
+        >>> import ptwt, pywt
+        >>> import numpy as np
+        >>> # generate an input of even length.
+        >>> d = torch.tensor([0., 1, 2, 3, 4, 5, 5, 4, 3, 2, 1, 0])
+        >>> # invert the fast wavelet transform.
+        >>> ptwt.imodwt(ptwt.modwt(d, pywt.Wavelet('haar'), level=2), pywt.Wavelet('haar'))
+    """
+    dec_lo, dec_hi, _, _ = _wavelet_as_tensor(wavelet, coeffs.device, coeffs.dtype)
+
+    dec_lo = dec_lo / torch.sqrt(torch.tensor(2.))
+    dec_hi = dec_hi / torch.sqrt(torch.tensor(2.))
+
+    level = coeffs.shape[0] - 1
+
+    v_j = coeffs[-1]
+    for jp in range(level):
+        j = level - jp - 1
+        v_j = _circular_convolve_s(dec_hi, dec_lo, coeffs[j], v_j, j + 1)
+    return v_j.squeeze()
+
+
+def modwtmra(coeffs: torch.Tensor,
+             wavelet: Union[Wavelet, str]
+             ) -> torch.Tensor:
+
+    dec_lo, dec_hi, _, _ = _wavelet_as_tensor(wavelet, coeffs.device, coeffs.dtype)
+    level, N = coeffs.shape[0], coeffs.shape[-1]
+    level = level - 1
+
+    def _conv(d, kernel):
+        s_k = kernel.shape[-1] - 1
+        return torch.nn.functional.conv1d(
+            torch.nn.functional.pad(
+                d,
+                (s_k, s_k),
+                'constant', 0
+            ),
+            kernel.flip(-1)
+        )
+
+    # Details
+    D = []
+    g_j_part = torch.tensor([[[1.]]])
+    for j in range(level):
+        # g_j_part
+        g_j_up = _up_arrow_op(dec_lo, j)
+        g_j_part = _conv(g_j_up, g_j_part)
+
+        # h_j_o
+        h_j_up = _up_arrow_op(dec_hi, j + 1)
+        h_j = _conv(h_j_up, g_j_part)
+        h_j_t = h_j / (2 ** ((j + 1) / 2.))
+        if j == 0:
+            h_j_t = dec_hi.view(1, 1, -1) / torch.sqrt(torch.tensor(2.))
+        h_j_t_o = _period_list(h_j_t, N)
+        D.append(_circular_convolve_mra(h_j_t_o, coeffs[j]))
+
+    # Scale
+    j = level - 1
+    g_j_up = _up_arrow_op(dec_lo, j + 1)
+    g_j = _conv(g_j_up, g_j_part)
+    g_j_t = g_j / (2 ** ((j + 1) / 2.))
+    g_j_t_o = _period_list(g_j_t, N)
+    D.append(_circular_convolve_mra(g_j_t_o, coeffs[-1]))
+    return torch.stack(D).squeeze()
