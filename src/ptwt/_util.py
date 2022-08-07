@@ -69,18 +69,20 @@ def _wavelet_as_tensor(wavelet: Union[Wavelet, str],
             torch.tensor(rec_hi, device=device, dtype=dtype))
 
 
+@torch.jit.script
 def _up_arrow_op(dec: torch.Tensor, j: int) -> torch.Tensor:
     if j == 0:
         return torch.tensor([[[1.]]])
     N = dec.shape[-1]
-    dec_n = torch.zeros(2 ** (j - 1) * (N - 1) + 1)
+    dec_n = torch.zeros(int(2 ** (j - 1) * (N - 1) + 1))
     for i in range(N):
-        dec_n[2 ** (j - 1) * i] = dec[..., i]
+        dec_n[int(2 ** (j - 1) * i)] = dec[..., i]
     return dec_n.view(1, 1, -1)
 
 
+@torch.jit.script
 def _period_list(d: torch.Tensor, N: int) -> torch.Tensor:
-    n_app = N - np.mod(d.shape[-1], N)
+    n_app = N - torch.remainder(d.shape[-1], N)
     d = torch.cat([d, torch.zeros(d.shape[0], d.shape[1], n_app)], dim=-1)
     if d.shape[-1] < 2 * N:
         return d
@@ -88,6 +90,7 @@ def _period_list(d: torch.Tensor, N: int) -> torch.Tensor:
         return d.view(-1, N).sum(dim=0)
 
 
+@torch.jit.script
 def _circular_convolve_d(dec: torch.Tensor, data: torch.Tensor, j: int) -> torch.Tensor:
     # data: [batch, features, window]
     assert torch.is_floating_point(dec)
@@ -101,11 +104,12 @@ def _circular_convolve_d(dec: torch.Tensor, data: torch.Tensor, j: int) -> torch
         for f in range(data.shape[1]):
             for t in range(N):
                 index = torch.remainder(t - 2 ** (j - 1) * torch.arange(L), N)
-                v_p = torch.gather(data[b, f, :], -1, index)
+                v_p = torch.gather(data[b, f, :], -1, index.type(torch.int64))
                 w_j[b, f, t] = (dec * v_p).sum()
     return w_j
 
 
+@torch.jit.script
 def _circular_convolve_s(dec_hi: torch.Tensor, dec_lo: torch.Tensor,
                          c_j: torch.Tensor, v_j: torch.Tensor, j: int) -> torch.Tensor:
     # data: [batch, features, window]
@@ -123,6 +127,7 @@ def _circular_convolve_s(dec_hi: torch.Tensor, dec_lo: torch.Tensor,
     return v_j_1
 
 
+@torch.jit.script
 def _circular_convolve_mra(h_j_o: torch.Tensor, c_j: torch.Tensor) -> torch.Tensor:
     N = c_j.shape[-1]
     D_j = torch.zeros(c_j.shape)
