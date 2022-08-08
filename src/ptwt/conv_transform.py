@@ -6,7 +6,7 @@ import pywt
 import torch
 
 from ._util import Wavelet, _as_wavelet, _wavelet_as_tensor, _circular_convolve_d, _circular_convolve_s, _up_arrow_op, \
-    _period_list, _circular_convolve_mra
+    _period_list, _circular_convolve_mra, _conv
 
 
 def get_filter_tensors(
@@ -289,6 +289,18 @@ def waverec(coeffs: List[torch.Tensor], wavelet: Union[Wavelet, str]) -> torch.T
     return res_lo
 
 
+@torch.jit.script
+def _modwt(data: torch.Tensor, level: int, dec_hi: torch.Tensor, dec_lo: torch.Tensor) -> torch.Tensor:
+    wavecoeff = []
+    v_j_1 = data
+    for j in range(level):
+        w = _circular_convolve_d(dec_hi, v_j_1, j + 1)
+        v_j_1 = _circular_convolve_d(dec_lo, v_j_1, j + 1)
+        wavecoeff.append(w)
+    wavecoeff.append(v_j_1)
+    return torch.stack(wavecoeff)
+
+
 def modwt(data: torch.Tensor,
           wavelet: Union[Wavelet, str],
           level: Optional[int] = None
@@ -326,14 +338,17 @@ def modwt(data: torch.Tensor,
     if level is None:
         level = pywt.dwt_max_level(data.shape[-1], dec_lo.shape[-1])
 
-    wavecoeff = []
-    v_j_1 = data
-    for j in range(level):
-        w = _circular_convolve_d(dec_hi, v_j_1, j + 1)
-        v_j_1 = _circular_convolve_d(dec_lo, v_j_1, j + 1)
-        wavecoeff.append(w)
-    wavecoeff.append(v_j_1)
-    return torch.stack(wavecoeff)
+    return _modwt(data, level, dec_hi, dec_lo)
+
+
+@torch.jit.script
+def _imodwt(coeffs: torch.Tensor, dec_hi: torch.Tensor, dec_lo: torch.Tensor) -> torch.Tensor:
+    level = coeffs.shape[0] - 1
+    v_j = coeffs[-1]
+    for jp in range(level):
+        j = level - jp - 1
+        v_j = _circular_convolve_s(dec_hi, dec_lo, coeffs[j], v_j, j + 1)
+    return v_j.squeeze()
 
 
 def imodwt(coeffs: torch.Tensor, wavelet: Union[Wavelet, str]) -> torch.Tensor:
@@ -356,37 +371,17 @@ def imodwt(coeffs: torch.Tensor, wavelet: Union[Wavelet, str]) -> torch.Tensor:
     dec_lo = dec_lo / torch.sqrt(torch.tensor(2.))
     dec_hi = dec_hi / torch.sqrt(torch.tensor(2.))
 
-    level = coeffs.shape[0] - 1
-
-    v_j = coeffs[-1]
-    for jp in range(level):
-        j = level - jp - 1
-        v_j = _circular_convolve_s(dec_hi, dec_lo, coeffs[j], v_j, j + 1)
-    return v_j.squeeze()
+    return _imodwt(coeffs, dec_hi, dec_lo)
 
 
-def modwtmra(coeffs: torch.Tensor,
-             wavelet: Union[Wavelet, str]
-             ) -> torch.Tensor:
-
-    dec_lo, dec_hi, _, _ = _wavelet_as_tensor(wavelet, coeffs.device, coeffs.dtype)
+@torch.jit.script
+def _modwtmra(coeffs: torch.Tensor, dec_hi: torch.Tensor, dec_lo: torch.Tensor) -> torch.Tensor:
     level, N = coeffs.shape[0], coeffs.shape[-1]
     level = level - 1
 
-    def _conv(d, kernel):
-        s_k = kernel.shape[-1] - 1
-        return torch.nn.functional.conv1d(
-            torch.nn.functional.pad(
-                d,
-                (s_k, s_k),
-                'constant', 0
-            ),
-            kernel.flip(-1)
-        )
-
     # Details
     D = []
-    g_j_part = torch.tensor([[[1.]]])
+    g_j_part = torch.tensor([[[1.]]], device=coeffs.device)
     for j in range(level):
         # g_j_part
         g_j_up = _up_arrow_op(dec_lo, j)
@@ -409,3 +404,12 @@ def modwtmra(coeffs: torch.Tensor,
     g_j_t_o = _period_list(g_j_t, N)
     D.append(_circular_convolve_mra(g_j_t_o, coeffs[-1]))
     return torch.stack(D).squeeze()
+
+
+def modwtmra(coeffs: torch.Tensor,
+             wavelet: Union[Wavelet, str]
+             ) -> torch.Tensor:
+    dec_lo, dec_hi, _, _ = _wavelet_as_tensor(wavelet, coeffs.device, coeffs.dtype)
+
+    return _modwtmra(coeffs, dec_hi, dec_lo)
+

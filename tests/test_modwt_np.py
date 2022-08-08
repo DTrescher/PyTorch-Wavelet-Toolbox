@@ -501,7 +501,7 @@ def test_stuff():
                          42.5000, 42.4900, 42.4900, 42.4900, 42.5200, 42.5100, 42.5300, 42.5300,
                          42.5300, 42.5210, 42.5300, 42.5300, 42.5210, 42.5300, 42.5200, 42.5200,
                          42.5300, 42.5300, 42.5200, 42.5300, 42.6000, 42.5900, 42.5800, 42.5800,
-                         42.5900, 42.5800, 42.5700, 42.5600, 42.5600, 42.5700, 42.5700, 42.5800], dtype=torch.float32)
+                         42.5900, 42.5800, 42.5700, 42.5600, 42.5600, 42.5700, 42.5700, 42.5800], dtype=torch.float32, device='cuda:0')
 
     wavelet = pywt.Wavelet('haar')
 
@@ -510,15 +510,17 @@ def test_stuff():
     #plt.show()
 
     #modwtmra(modwt(data, wavelet), wavelet)
-    t0 = time.time()
-    x = modwtmra(modwt(data, wavelet, level=9), wavelet)
-    t1 = time.time()
-    print()
-    #print(x.shape)
-    print(t1-t0, 'seconds')
-    print(_circular_convolve_d.graph)
 
-    for i in x:
-        plt.plot(i.squeeze())
-        #plt.legend()
-        plt.show()
+    print()
+    for i in range(6):
+        t0 = time.time()
+        x_mra = modwtmra(modwt(data, wavelet, level=9), wavelet)
+        t1 = time.time()
+        print(t1 - t0, 'seconds')
+
+    assert x_mra.sum(0).allclose(data)
+
+    #for i in x:
+    #    plt.plot(i.squeeze())
+    #    #plt.legend()
+    #    plt.show()
